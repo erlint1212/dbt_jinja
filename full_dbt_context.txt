@@ -1,0 +1,318 @@
+
+
+==================================================================
+FILE: ./tests/assert_stg_stripe__payment_total_positive.sql
+==================================================================
+select
+    order_id,
+    sum(amount) as total_amount
+from {{ ref('stg_stripe__payments') }}
+group by 1
+having sum(amount) < 0
+
+==================================================================
+FILE: ./dbt_project.yml
+==================================================================
+
+# Name your project! Project names should contain only lowercase characters
+# and underscores. A good package name should reflect your organization's
+# name or the intended use of these models
+name: 'jaffle_shop'
+version: '1.0.0'
+config-version: 2
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'snowflake'
+
+# These configurations specify where dbt should look for different types of files.
+# The `model-paths` config, for example, states that models in this project can be
+# found in the "models/" directory. You probably won't need to change these!
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"  # directory which will store compiled SQL files
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+
+# Configuring models
+# Full documentation: https://docs.getdbt.com/docs/configuring-models
+
+# In dbt, the default materialization for a model is a view. This means, when you run 
+# dbt run or dbt build, all of your models will be built as a view in your data platform. 
+# The configuration below will override this setting for models in the example folder to 
+# instead be materialized as tables. Any models you add to the root of the models folder will 
+# continue to be built as views. These settings can be overridden in the individual model files
+# using the `{{ config(...) }}` macro.
+
+models:
+  jaffle_shop:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+
+
+==================================================================
+FILE: ./models/marts/marketing/dim_customers.sql
+==================================================================
+with customers as (
+    select * from {{ ref ('stg_jaffle_shop__customers')}}
+),
+orders as (
+    select * from {{ ref ('fct_orders')}}
+),
+customer_orders as (
+    select
+        customer_id,
+        min (order_date) as first_order_date,
+        max (order_date) as most_recent_order_date,
+        count(order_id) as number_of_orders,
+        sum(amount) as lifetime_value
+    from orders
+    group by 1
+),
+ final as (
+    select
+        customers.customer_id,
+        customers.first_name,
+        customers.last_name,
+        customer_orders.first_order_date,
+        customer_orders.most_recent_order_date,
+        coalesce (customer_orders.number_of_orders, 0) as number_of_orders,
+        customer_orders.lifetime_value
+    from customers
+    left join customer_orders using (customer_id)
+)
+select * from final
+
+==================================================================
+FILE: ./models/marts/finance/fct_orders.sql
+==================================================================
+with orders as ( 
+
+    select * from {{ ref('stg_jaffle_shop__orders') }}
+
+),
+
+payments as (
+
+    select * from {{ ref('stg_stripe__payments') }}
+
+),
+
+order_payment_totals as (
+
+    select
+        order_id,
+        sum(case when status = 'success' then amount end) as amount
+    from payments
+    group by 1
+
+),
+
+final as (
+
+    select
+        orders.order_id,
+        orders.customer_id,
+        orders.order_date,
+        coalesce(order_payment_totals.amount, 0) as amount
+    from orders
+
+    left join order_payment_totals using (order_id)
+
+)
+
+select * from final
+
+==================================================================
+FILE: ./models/staging/stripe/_src_stripe.yml
+==================================================================
+sources:
+  - name: stripe
+    database: raw
+    schema: stripe
+    tables:
+      - name: payment
+        config:
+          loaded_at_field: _batched_at
+          freshness:
+            warn_after: {count: 12, period: hour}
+            error_after: {count: 7, period: day}
+
+==================================================================
+FILE: ./models/staging/stripe/stg_stripe__payments.sql
+==================================================================
+with 
+
+source as (
+
+    select * from {{ source('stripe', 'payment') }}
+
+),
+
+renamed as (
+
+    select
+        id as payment_id,
+        orderid as order_id,
+        paymentmethod as payment_method,
+        status,
+
+        -- amount is stored in cents, convert it to dollars
+        amount / 100 as amount,
+        created as created_at
+
+    from source
+
+)
+
+select * from renamed
+
+==================================================================
+FILE: ./models/staging/stripe/_stg_stripe.yml
+==================================================================
+models:
+  - name: stg_stripe__payments
+    description: Staged payment data from our Stripe payment processor.
+    columns:
+      - name: payment_id
+        description: Primary key for payments.
+        data_tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: Foreign key to the orders table.
+        data_tests:
+          - relationships:
+              to: ref('stg_jaffle_shop__orders')
+              field: order_id
+      - name: payment_method
+        description: "{{ doc('payment_methods') }}" 
+      - name: amount
+        description: The payment amount in cents. 
+      - name: created_at
+        description: Timestamp of when the payment was processed.
+
+
+==================================================================
+FILE: ./models/staging/jaffle_shop/_stg_jaffle_shop.yml
+==================================================================
+models:
+  - name: stg_jaffle_shop__customers
+    description: Staged customer data from our jaffle shop app.
+    columns: 
+      - name: customer_id
+        description: The primary key for customers.
+        data_tests:
+          - unique
+          - not_null
+
+  - name: stg_jaffle_shop__orders
+    description: Staged order data from our jaffle shop app.
+    columns: 
+      - name: order_id
+        description: Primary key for orders.
+        data_tests:
+          - unique
+          - not_null
+      - name: order_status
+        description: "{{ doc('order_status') }}"
+        data_tests:
+          - accepted_values:
+              values:
+                - completed
+                - shipped
+                - returned
+                - placed
+                - return_pending
+      - name: customer_id
+        description: Foreign key to stg_customers.customer_id
+        data_tests:
+          - relationships:
+              to: ref('stg_jaffle_shop__customers')
+              field: customer_id
+
+
+==================================================================
+FILE: ./models/staging/jaffle_shop/stg_jaffle_shop__customers.sql
+==================================================================
+with 
+
+source as (
+
+    select * from {{ source('jaffle_shop', 'customers') }}
+
+),
+
+renamed as (
+
+    select
+        id as customer_id,
+        first_name,
+        last_name
+
+    from source
+
+)
+
+select * from renamed
+
+==================================================================
+FILE: ./models/staging/jaffle_shop/stg_jaffle_shop__orders.sql
+==================================================================
+with 
+
+source as (
+
+    select * from {{ source('jaffle_shop', 'orders') }}
+
+),
+
+renamed as (
+
+    select
+        id as order_id,
+        user_id as customer_id,
+        order_date,
+        status as order_status
+
+    from source
+
+)
+
+select * from renamed
+
+==================================================================
+FILE: ./models/staging/jaffle_shop/_src_jaffle_shop.yml
+==================================================================
+sources:
+  - name: jaffle_shop
+    description: A clone of a Postgres database
+    database: raw
+    schema: jaffle_shop
+    tables:
+      - name: customers
+        description: Raw customers data
+        columns:
+          - name: id
+            description: primary key
+            data_tests:
+              - unique
+              - not_null        
+      - name: orders
+        config:
+          freshness:
+            warn_after:
+              count: 24
+              period: hour
+            error_after:
+              count: 48
+              period: hour
+          loaded_at_field: _etl_loaded_at

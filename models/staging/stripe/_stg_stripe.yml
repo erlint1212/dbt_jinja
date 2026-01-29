@@ -1,0 +1,21 @@
+models:
+  - name: stg_stripe__payments
+    description: Staged payment data from our Stripe payment processor.
+    columns:
+      - name: payment_id
+        description: Primary key for payments.
+        data_tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: Foreign key to the orders table.
+        data_tests:
+          - relationships:
+              to: ref('stg_jaffle_shop__orders')
+              field: order_id
+      - name: payment_method
+        description: "{{ doc('payment_methods') }}" 
+      - name: amount
+        description: The payment amount in cents. 
+      - name: created_at
+        description: Timestamp of when the payment was processed.
