@@ -36,7 +36,9 @@ clean-targets:         # directories to be removed by `dbt clean`
 # using the `{{ config(...) }}` macro.
 
 models:
-  jaffle_shop:
+  dbt_learn_jinja:
+    snowflake_spend:
+      +enable: true
     staging:
       +materialized: view
     marts:
