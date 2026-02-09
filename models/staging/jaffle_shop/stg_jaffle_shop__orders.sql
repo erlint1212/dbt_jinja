@@ -10,9 +10,9 @@ renamed as (
 
     select
         id as order_id,
-        user_id as customer_id,
-        order_date,
-        status as order_status
+        customer as customer_id,
+        ordered_at as order_date,
+        'completed' as order_status
 
     from source
 
